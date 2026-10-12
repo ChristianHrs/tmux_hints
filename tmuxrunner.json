@@ -1,0 +1,12 @@
+{
+    "KPlugin": {
+        "Id": "krunner_tmux",
+        "Name": "Tmux Cheatsheet",
+        "Description": "Autocomplete tmux commands, flags and targets, and attach to running sessions",
+        "Icon": "utilities-terminal",
+        "License": "GPL-2.0-or-later",
+        "Version": "1.0",
+        "EnabledByDefault": true
+    },
+    "X-Plasma-API-Minimum-Version": "2.0"
+}
