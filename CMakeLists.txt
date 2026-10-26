@@ -18,7 +18,7 @@ find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core Gui)
 find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS Runner KIO CoreAddons)
 
 kcoreaddons_add_plugin(krunner_tmux
-    SOURCES tmuxrunner.cpp tmuxrunner.h tmuxcommands.h
+    SOURCES tmuxrunner.cpp tmuxrunner.h tmuxcommands.h tmuxbindings.h
     INSTALL_NAMESPACE "kf6/krunner")
 
 target_link_libraries(krunner_tmux

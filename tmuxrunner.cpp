@@ -7,11 +7,16 @@
 #include <KTerminalLauncherJob>
 
 #include <QClipboard>
+#include <QDir>
+#include <QFile>
 #include <QGuiApplication>
+#include <QHash>
 #include <QMutexLocker>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSet>
+#include <QStandardPaths>
+#include <QTextStream>
 
 #include <algorithm>
 #include <utility>
@@ -22,7 +27,7 @@ namespace
 {
 const QString kIcon = QStringLiteral("utilities-terminal");
 
-// Match data kinds: [kind, payload]
+// Match data: [kind, payload, (optional unique suffix)]
 const QString kComplete = QStringLiteral("complete"); // payload = new query text
 const QString kRun = QStringLiteral("run");           // payload = command line
 const QString kSession = QStringLiteral("session");   // payload = session name
@@ -31,6 +36,13 @@ QStringList tokenize(const QString &s)
 {
     static const QRegularExpression ws(QStringLiteral("\\s+"));
     return s.split(ws, Qt::SkipEmptyParts);
+}
+
+// Words of a tmux command with quotes/braces stripped, for matching.
+QStringList commandWords(const QString &cmd)
+{
+    static const QRegularExpression sep(QStringLiteral("[\\s'\"{}]+"));
+    return cmd.split(sep, Qt::SkipEmptyParts);
 }
 
 QStringList runTmux(const QStringList &args)
@@ -164,6 +176,258 @@ void copyToClipboard(const QString &text)
         },
         Qt::QueuedConnection);
 }
+
+// ---- Key bindings --------------------------------------------------------
+
+// "C-s" -> "Ctrl+S", "M-Left" -> "Alt+Left", "PPage" -> "Page Up"
+QString humanizeKey(const QString &key)
+{
+    static const QHash<QString, QString> names{
+        {QStringLiteral("BSpace"), QStringLiteral("Backspace")},
+        {QStringLiteral("PPage"), QStringLiteral("Page Up")},
+        {QStringLiteral("NPage"), QStringLiteral("Page Down")},
+        {QStringLiteral("Escape"), QStringLiteral("Esc")},
+        {QStringLiteral("BTab"), QStringLiteral("Shift+Tab")},
+        {QStringLiteral("DC"), QStringLiteral("Delete")},
+        {QStringLiteral("IC"), QStringLiteral("Insert")},
+    };
+    QString rest = key;
+    QStringList parts;
+    while (rest.size() > 2 && rest.at(1) == QLatin1Char('-')) {
+        const QChar m = rest.at(0);
+        if (m == u'C') {
+            parts << QStringLiteral("Ctrl");
+        } else if (m == u'M') {
+            parts << QStringLiteral("Alt");
+        } else if (m == u'S') {
+            parts << QStringLiteral("Shift");
+        } else {
+            break;
+        }
+        rest = rest.mid(2);
+    }
+    rest = names.value(rest, rest);
+    if (!parts.isEmpty() && rest.size() == 1) {
+        rest = rest.toUpper();
+    }
+    parts << rest;
+    return parts.join(QLatin1Char('+'));
+}
+
+QString prefixLetter(const QString &prefix)
+{
+    return prefix.size() == 3 && prefix.startsWith(QLatin1String("C-")) ? prefix.mid(2).toLower() : QString();
+}
+
+// Used when no tmux server is running: look for "set -g prefix C-s" in the config.
+QString prefixFromConfig()
+{
+    const QStringList files{
+        QDir::homePath() + QStringLiteral("/.tmux.conf"),
+        QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation) + QStringLiteral("/tmux/tmux.conf"),
+    };
+    static const QRegularExpression re(QStringLiteral("^\\s*set(?:-option)?\\s+(?:-\\w+\\s+)*prefix\\s+(\\S+)"));
+    QString found;
+    for (const QString &path : files) {
+        QFile f(path);
+        if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            continue;
+        }
+        QTextStream in(&f);
+        while (!in.atEnd()) {
+            const auto m = re.match(in.readLine());
+            if (m.hasMatch()) {
+                found = m.captured(1);
+                found.remove(QLatin1Char('"')).remove(QLatin1Char('\''));
+            }
+        }
+    }
+    return found;
+}
+
+// Best description for a command. Nested commands (inside confirm-before or
+// command-prompt) win over the wrapper, more specific entries win over generic ones.
+const KnownBinding *findKnownBinding(const QString &command)
+{
+    const QStringList words = commandWords(command);
+    if (words.isEmpty()) {
+        return nullptr;
+    }
+    const KnownBinding *best = nullptr;
+    double bestScore = 0;
+    for (const KnownBinding &k : knownBindings()) {
+        const QStringList need = commandWords(k.command);
+        if (need.isEmpty() || !std::all_of(need.cbegin(), need.cend(), [&](const QString &w) {
+                return words.contains(w);
+            })) {
+            continue;
+        }
+        const double score = need.size() + (need.first() != words.first() ? 0.5 : 0.0);
+        if (score > bestScore) {
+            best = &k;
+            bestScore = score;
+        }
+    }
+    return best;
+}
+
+double knownIndex(const KnownBinding *k)
+{
+    return static_cast<double>(k - knownBindings().constData());
+}
+
+const KnownBinding *knownByCommand(const QString &command)
+{
+    for (const KnownBinding &k : knownBindings()) {
+        if (k.command == command) {
+            return &k;
+        }
+    }
+    return nullptr;
+}
+
+bool isMouseKey(const QString &key)
+{
+    static const QRegularExpression re(QStringLiteral("Mouse|Wheel|Click|Drag"));
+    return re.match(key).hasMatch();
+}
+
+void describe(TmuxBinding &b, const QString &note)
+{
+    static const QRegularExpression windowN(QStringLiteral("^select-window -t :?=?(\\d+)$"));
+    const auto wn = windowN.match(commandWords(b.command).join(QLatin1Char(' ')));
+    if (wn.hasMatch()) {
+        b.desc = QStringLiteral("Go to window ") + wn.captured(1);
+        b.keywords = QStringLiteral("number window tab switch go select index");
+        b.order = 5.5;
+        return;
+    }
+    if (const KnownBinding *k = findKnownBinding(b.command)) {
+        b.desc = k->desc;
+        b.keywords = k->keywords;
+        b.order = knownIndex(k);
+        return;
+    }
+    const Command *c = findCommand(commandWords(b.command).value(0), false);
+    b.desc = !note.isEmpty() ? note : c ? c->desc : QStringLiteral("Custom binding");
+    b.order = 1000; // not in our list: show after the common ones
+}
+
+// Parses `tmux list-keys`, e.g.:  bind-key -r -T prefix C-Up resize-pane -U
+QList<TmuxBinding> parseBindings(const QStringList &lines)
+{
+    QList<TmuxBinding> out;
+    bool digits = false;
+    for (const QString &line : lines) {
+        KShell::Errors err = KShell::NoError;
+        const QStringList t = KShell::splitArgs(line, KShell::NoOptions, &err);
+        if (err != KShell::NoError || t.size() < 3 || t.first() != QLatin1String("bind-key")) {
+            continue;
+        }
+        TmuxBinding b;
+        b.table = QStringLiteral("prefix");
+        QString note;
+        int i = 1;
+        while (i < t.size()) {
+            const QString &f = t.at(i);
+            if (f == QLatin1String("-r")) {
+                ++i;
+            } else if (f == QLatin1String("-n")) {
+                b.table = QStringLiteral("root");
+                ++i;
+            } else if (f == QLatin1String("-T") && i + 1 < t.size()) {
+                b.table = t.at(i + 1);
+                i += 2;
+            } else if (f == QLatin1String("-N") && i + 1 < t.size()) {
+                note = t.at(i + 1);
+                i += 2;
+            } else {
+                break;
+            }
+        }
+        if (i >= t.size() || (b.table != QLatin1String("prefix") && b.table != QLatin1String("root"))) {
+            continue; // copy-mode tables etc.
+        }
+        b.key = t.at(i);
+        b.command = KShell::joinArgs(t.mid(i + 1));
+        if (b.command.isEmpty() || isMouseKey(b.key)) {
+            continue;
+        }
+
+        // Collapse the ten "go to window N" bindings into one entry.
+        static const QRegularExpression windowN(QStringLiteral("^select-window -t :?=?\\d$"));
+        if (b.table == QLatin1String("prefix") && b.key.size() == 1 && b.key.at(0).isDigit()
+            && windowN.match(commandWords(b.command).join(QLatin1Char(' '))).hasMatch()) {
+            digits = true;
+            continue;
+        }
+
+        describe(b, note);
+        out << b;
+    }
+
+    if (digits) {
+        if (const KnownBinding *k = knownByCommand(QStringLiteral("select-window -t :=N"))) {
+            out << TmuxBinding{QStringLiteral("prefix"), k->key, QStringLiteral("select-window -t :=N"), k->desc, k->keywords, knownIndex(k)};
+        }
+    }
+    std::stable_sort(out.begin(), out.end(), [](const TmuxBinding &a, const TmuxBinding &b) {
+        return a.order < b.order;
+    });
+    return out;
+}
+
+QList<TmuxBinding> defaultBindings(const QString &prefix)
+{
+    QList<TmuxBinding> out;
+    for (const KnownBinding &k : knownBindings()) {
+        const bool isSendPrefix = k.command == QLatin1String("send-prefix");
+        out << TmuxBinding{QStringLiteral("prefix"), isSendPrefix ? prefix : k.key, k.command, k.desc, k.keywords, knownIndex(&k)};
+    }
+    return out;
+}
+
+QStringList searchTerms(const QStringList &words)
+{
+    static const QSet<QString> stop{
+        QStringLiteral("how"), QStringLiteral("to"), QStringLiteral("do"), QStringLiteral("i"),
+        QStringLiteral("the"), QStringLiteral("a"), QStringLiteral("an"), QStringLiteral("my"),
+        QStringLiteral("in"), QStringLiteral("of"), QStringLiteral("with"), QStringLiteral("tmux"),
+        QStringLiteral("shortcut"), QStringLiteral("shortcuts"), QStringLiteral("hotkey"), QStringLiteral("key"),
+    };
+    QStringList out;
+    for (const QString &w : words) {
+        const QString l = w.toLower();
+        if (!stop.contains(l)) {
+            out << l;
+        }
+    }
+    return out;
+}
+
+// Every search term must be the start of some word in the description/keywords/command.
+bool bindingMatches(const TmuxBinding &b, const QStringList &terms)
+{
+    static const QRegularExpression sep(QStringLiteral("[^\\w-]+"));
+    const QString text = b.desc + QLatin1Char(' ') + b.keywords + QLatin1Char(' ') + commandWords(b.command).join(QLatin1Char(' '));
+    const QStringList hay = text.toLower().split(sep, Qt::SkipEmptyParts);
+    for (const QString &t : terms) {
+        if (!std::any_of(hay.cbegin(), hay.cend(), [&](const QString &h) {
+                return h.startsWith(t);
+            })) {
+            return false;
+        }
+    }
+    return true;
+}
+
+QString shortcutText(const TmuxBinding &b, const QString &prefix)
+{
+    if (b.table == QLatin1String("root")) {
+        return humanizeKey(b.key) + QStringLiteral(" (no prefix)");
+    }
+    return humanizeKey(prefix) + QStringLiteral(" then ") + humanizeKey(b.key);
+}
 } // namespace
 
 TmuxRunner::TmuxRunner(QObject *parent, const KPluginMetaData &metaData)
@@ -176,6 +440,8 @@ TmuxRunner::TmuxRunner(QObject *parent, const KPluginMetaData &metaData)
     setTriggerWords({QStringLiteral("tmux")});
     addSyntax(QStringLiteral("tmux"), QStringLiteral("Lists tmux commands and your running sessions"));
     addSyntax(QStringLiteral("tmux :q:"), QStringLiteral("Suggests the next command, flag or target for :q:"));
+    addSyntax(QStringLiteral("tmux ctrl + b"), QStringLiteral("Lists the shortcuts for your prefix key (use your own prefix, or type \"tmux prefix\")"));
+    addSyntax(QStringLiteral("tmux split screen"), QStringLiteral("Finds the keyboard shortcut for what you describe"));
 }
 
 TmuxRunner::Snapshot TmuxRunner::snapshot()
@@ -220,6 +486,22 @@ TmuxRunner::Snapshot TmuxRunner::snapshot()
                                            sec(3) == QLatin1String("1") ? QStringLiteral(" · active") : QString());
             s.panes.append({sec(0) + QLatin1Char(':') + sec(1) + QLatin1Char('.') + sec(2), label});
         }
+
+        // Your real prefix and bindings, including everything from your tmux.conf
+        const QStringList prefix = runTmux({QStringLiteral("show-options"), QStringLiteral("-gv"), QStringLiteral("prefix")});
+        if (!prefix.isEmpty() && !prefix.first().trimmed().isEmpty()) {
+            s.prefix = prefix.first().trimmed();
+        }
+        s.bindings = parseBindings(runTmux({QStringLiteral("list-keys")}));
+        s.liveBindings = !s.bindings.isEmpty();
+    }
+
+    if (!s.liveBindings) {
+        const QString configured = prefixFromConfig();
+        if (!configured.isEmpty()) {
+            s.prefix = configured;
+        }
+        s.bindings = defaultBindings(s.prefix);
     }
 
     m_cache = s;
@@ -241,11 +523,38 @@ KRunner::QueryMatch TmuxRunner::makeMatch(const QString &text, const QString &su
     return m;
 }
 
+KRunner::QueryMatch TmuxRunner::bindingMatch(const TmuxBinding &b, const QString &prefix, qreal relevance, bool descFirst)
+{
+    const QString shortcut = shortcutText(b, prefix);
+    const QString command = QStringLiteral("tmux ") + b.command;
+    const QStringList data{kComplete, command + QLatin1Char(' '), b.table + QLatin1Char(':') + b.key};
+
+    // Search results lead with what it does; the prefix list leads with the keys.
+    auto m = descFirst ? makeMatch(b.desc, QStringLiteral("Shortcut: ") + shortcut + QStringLiteral("  ·  ") + command, relevance, data)
+                       : makeMatch(shortcut, b.desc + QStringLiteral("  ·  ") + command, relevance, data);
+    m.setActions({m_runAction, m_copyAction});
+    return m;
+}
+
 void TmuxRunner::match(KRunner::RunnerContext &context)
 {
     const QString query = context.query();
     static const QRegularExpression head(QStringLiteral("^tmux(\\s|$)"), QRegularExpression::CaseInsensitiveOption);
     if (!head.match(query).hasMatch()) {
+        return;
+    }
+
+    // "tmux ctrl + s", "tmux ctrl+s split", "tmux C-s %", "tmux prefix"
+    static const QRegularExpression prefixRe(
+        QStringLiteral("^\\s*(?:prefix|ctrl|control|c-|\\^)\\s*[-+]?\\s*(?:([a-z0-9])(?![a-z0-9]))?\\s*(.*)$"),
+        QRegularExpression::CaseInsensitiveOption);
+    const auto pm = prefixRe.match(query.mid(4));
+    if (pm.hasMatch()) {
+        QList<KRunner::QueryMatch> matches;
+        matchPrefixMode(query, pm.captured(1), pm.captured(2).trimmed(), matches);
+        if (context.isValid()) {
+            context.addMatches(matches);
+        }
         return;
     }
 
@@ -263,6 +572,22 @@ void TmuxRunner::match(KRunner::RunnerContext &context)
         base += t + QLatin1Char(' ');
     }
 
+    // Plain-words search over shortcuts: "tmux split scr" -> "Split the pane ... Ctrl+S then %"
+    QStringList words = tokens;
+    if (!partial.isEmpty()) {
+        words << partial;
+    }
+    QList<KRunner::QueryMatch> searchMatches;
+    bool strongSearch = false;
+    const bool hasFlag = std::any_of(words.cbegin(), words.cend(), [](const QString &w) {
+        return w.startsWith(QLatin1Char('-'));
+    });
+    if (!words.isEmpty() && !hasFlag) {
+        // Several words, or a word that isn't a command, reads like a description.
+        strongSearch = words.size() >= 2 || !findCommand(words.first());
+        matchBindingSearch(words, strongSearch, searchMatches);
+    }
+
     QList<KRunner::QueryMatch> matches;
     if (tokens.isEmpty()) {
         matchCommandNames(partial, matches);
@@ -272,15 +597,78 @@ void TmuxRunner::match(KRunner::RunnerContext &context)
         }
     } else if (const Command *cmd = findCommand(tokens.first())) {
         matchArguments(*cmd, tokens.mid(1), partial, base, false, matches);
-    } else {
+    } else if (searchMatches.isEmpty()) {
         matches << makeMatch(QStringLiteral("Unknown tmux command: %1").arg(tokens.first()),
-                             QStringLiteral("Type \"tmux \" to see all commands"), 0.1,
-                             {kComplete, QStringLiteral("tmux ")});
+                             QStringLiteral("Type \"tmux \" to see all commands, or describe what you want, e.g. \"tmux split screen\""),
+                             0.1, {kComplete, QStringLiteral("tmux ")});
     }
+
+    // If it reads like a description, the shortcuts beat "Run: tmux split scr".
+    if (strongSearch && !searchMatches.isEmpty()) {
+        for (KRunner::QueryMatch &m : matches) {
+            if (m.data().toStringList().value(0) == kRun) {
+                m.setRelevance(0.6);
+            }
+        }
+    }
+    matches += searchMatches;
 
     if (context.isValid()) {
         context.addMatches(matches);
     }
+}
+
+void TmuxRunner::matchPrefixMode(const QString &query, const QString &typedKey, const QString &filter, QList<KRunner::QueryMatch> &out)
+{
+    const Snapshot snap = snapshot();
+    const QString prefixText = humanizeKey(snap.prefix);
+
+    if (!typedKey.isEmpty() && typedKey.toLower() != prefixLetter(snap.prefix)) {
+        out << makeMatch(QStringLiteral("Your tmux prefix is %1, not Ctrl+%2").arg(prefixText, typedKey.toUpper()),
+                         QStringLiteral("Showing your shortcuts anyway"), 1.0, {kComplete, query});
+    } else if (filter.isEmpty()) {
+        out << makeMatch(QStringLiteral("Prefix: %1  (press it, let go, then the key)").arg(prefixText),
+                         snap.liveBindings ? QStringLiteral("Read from your running tmux server, including your own bindings")
+                                           : QStringLiteral("tmux isn't running, so these are the default bindings"),
+                         1.0, {kComplete, query});
+    }
+
+    const QStringList terms = searchTerms(tokenize(filter));
+    int n = 0;
+    for (const TmuxBinding &b : snap.bindings) {
+        const bool keyHit = !filter.isEmpty()
+            && (b.key == filter || humanizeKey(b.key).compare(filter, Qt::CaseInsensitive) == 0);
+        if (!filter.isEmpty() && !keyHit && (terms.isEmpty() || !bindingMatches(b, terms))) {
+            continue;
+        }
+        out << bindingMatch(b, snap.prefix, keyHit ? 0.99 : 0.95 - n * 0.003, false);
+        ++n;
+    }
+
+    if (n == 0) {
+        out << makeMatch(QStringLiteral("No shortcut matches \"%1\"").arg(filter),
+                         QStringLiteral("Try a word like split, window, zoom, copy or detach"), 0.5, {kComplete, query});
+    }
+}
+
+int TmuxRunner::matchBindingSearch(const QStringList &words, bool strong, QList<KRunner::QueryMatch> &out)
+{
+    const QStringList terms = searchTerms(words);
+    if (terms.isEmpty()) {
+        return 0;
+    }
+    const Snapshot snap = snapshot();
+    int n = 0;
+    for (const TmuxBinding &b : snap.bindings) {
+        if (!bindingMatches(b, terms)) {
+            continue;
+        }
+        out << bindingMatch(b, snap.prefix, (strong ? 0.97 : 0.7) - n * 0.002, true);
+        if (++n >= 8) {
+            break;
+        }
+    }
+    return n;
 }
 
 void TmuxRunner::matchCommandNames(const QString &partial, QList<KRunner::QueryMatch> &out)

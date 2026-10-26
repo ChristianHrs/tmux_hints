@@ -352,6 +352,33 @@ inline const QList<Command> &commands()
              {{u'b', "Buffer name", Arg::Text, "buffer-name"},
               {u'a', "Append instead of overwriting"}},
              "path"},
+
+            // ---- Commands used by the default key bindings ----------------
+            {"confirm-before", {"confirm"}, "Ask y/n before running a command",
+             {{u'p', "Prompt text", Arg::Text, "prompt"}, tp()}, "command"},
+            {"command-prompt", {}, "Open the tmux command prompt",
+             {{u'p', "Prompt text", Arg::Text, "prompts"}, {u'I', "Initial text", Arg::Text, "inputs"}, tp()},
+             "template"},
+            {"display-panes", {"displayp"}, "Show pane numbers in each pane",
+             {{u'd', "How long to show them (ms)", Arg::Text, "duration"}}},
+            {"last-pane", {"lastp"}, "Go back to the previously active pane", {tw()}},
+            {"next-layout", {"nextl"}, "Switch to the next pane layout", {tw()}},
+            {"rotate-window", {"rotatew"}, "Rotate the panes in a window",
+             {tw(), {u'D', "Rotate downwards"}, {u'U', "Rotate upwards (default)"}}},
+            {"find-window", {"findw"}, "Search windows by name, title or content",
+             {{u'N', "Match window names only"}, {u'C', "Match visible content only"},
+              {u'T', "Match pane titles only"}, tp()},
+             "match-string"},
+            {"clock-mode", {}, "Show a big clock in a pane", {tp()}},
+            {"choose-client", {}, "Interactive client picker (run inside tmux)", {{u'Z', "Zoom the pane"}, tp()}},
+            {"choose-buffer", {}, "Interactive paste-buffer picker (run inside tmux)", {{u'Z', "Zoom the pane"}, tp()}},
+            {"refresh-client", {"refresh"}, "Redraw a client",
+             {{u'S', "Only redraw the status line"}, {u't', "Client", Arg::Text, "target-client"}}},
+            {"suspend-client", {"suspendc"}, "Suspend a client", {{u't', "Client", Arg::Text, "target-client"}}},
+            {"show-messages", {"showmsgs"}, "Show the tmux message log", {{u't', "Client", Arg::Text, "target-client"}}},
+            {"delete-buffer", {"deleteb"}, "Delete a paste buffer", {{u'b', "Buffer name", Arg::Text, "buffer-name"}}},
+            {"send-prefix", {}, "Send the prefix key to a pane", {{u'2', "Send the secondary prefix"}, tp()}},
+            {"clear-history", {"clearhist"}, "Clear a pane's scrollback history", {tp()}},
         };
     }();
     return list;

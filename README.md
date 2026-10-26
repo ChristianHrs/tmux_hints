@@ -12,8 +12,6 @@ does? Just type it and read the hint.
 
 <img width="790" height="480" alt="tmux_hints_gif_example" src="https://github.com/user-attachments/assets/0a784869-685b-48d6-8fda-e0db4283e0bc" />
 
-
-
 | You type | You see |
 |---|---|
 | `tmux` | Your running sessions (Enter attaches), then every tmux command with a description |
@@ -22,6 +20,14 @@ does? Just type it and read the hint.
 | `tmux attach -t ` | The names of your actual running sessions |
 | `tmux splitw -t ` | Your live panes (`work:1.0`) and what's running in them |
 | `tmux select-layout ` | The layout names: `even-horizontal`, `tiled`, … |
+| `tmux ctrl + b` (your prefix) | Your keyboard shortcuts, most common first: `Ctrl+B then %` split left/right, … |
+| `tmux ctrl + b zoom` | Only the shortcuts about zooming |
+| `tmux prefix` | Same list, without having to know the prefix |
+| `tmux split screen` | "Split the pane left/right", with the shortcut that does it |
+
+Shortcuts are read from your running tmux server, so a custom prefix and your
+own bindings from `tmux.conf` show up. If tmux isn't running, it shows the
+defaults, using the prefix from your `tmux.conf`.
 
 - **Enter on a suggestion** puts it into KRunner and keeps the window open, so
   you can build a command step by step.
@@ -67,7 +73,7 @@ sudo zypper install gcc-c++ cmake extra-cmake-modules kf6-krunner-devel kf6-kio-
 ### 2. Build and install
 
 ```sh
-git clone https://github.com/ChristianHrs/tmux_hints.git
+git clone https://github.com/USERNAME/tmux_hints.git
 cd tmux_hints
 cmake -B build -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_BUILD_TYPE=Release
 cmake --build build
