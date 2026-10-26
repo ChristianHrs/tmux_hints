@@ -12,6 +12,9 @@ does? Just type it and read the hint.
 
 <img width="790" height="480" alt="tmux_hints_gif_example" src="https://github.com/user-attachments/assets/0a784869-685b-48d6-8fda-e0db4283e0bc" />
 
+https://github.com/user-attachments/assets/4ac0ae51-c4d0-4bf0-ad64-15ed8e25e50d
+
+
 | You type | You see |
 |---|---|
 | `tmux` | Your running sessions (Enter attaches), then every tmux command with a description |
